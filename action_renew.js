@@ -44,6 +44,55 @@ async function sendTelegramMessage(message, imagePath = null) {
 // 启用 stealth 插件
 chromium.use(stealth);
 
+// --- GitHub Issue 通知配置（仅在 Actions 环境生效，本地运行自动跳过）---
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY;
+const GITHUB_ACTOR = process.env.GITHUB_ACTOR || '';
+const issueEvents = []; // 本次运行的事件收集器
+
+// 统一事件记录：写进 Issue 报告 + 兼容 Telegram（未配置则跳过）
+function recordEvent(icon, title, lines, shotPath = null) {
+    const detail = Array.isArray(lines) ? lines.join('\n') : String(lines);
+    const time = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+    issueEvents.push({ icon, title, detail, time, shotPath });
+    console.log(`[${icon}] ${title} | ${detail.replace(/\n/g, ' ; ')}`);
+    if (TG_BOT_TOKEN && TG_CHAT_ID) {
+        const tgText = `${icon} *${title}*\n${detail.split('\n').map(l => l.replace(/[*_`]/g, '')).join('\n')}`;
+        sendTelegramMessage(tgText, shotPath);
+    }
+}
+
+// 运行结束时把报告发布为 GitHub Issue（已有同名 open issue 则追加评论）
+async function postIssueReport() {
+    if (!GITHUB_TOKEN || !GITHUB_REPOSITORY || issueEvents.length === 0) return;
+    const api = `https://api.github.com/repos/${GITHUB_REPOSITORY}`;
+    const headers = {
+        Authorization: `token ${GITHUB_TOKEN}`,
+        'User-Agent': 'katabump-renew-bot',
+        Accept: 'application/vnd.github+json'
+    };
+    const title = '📋 KataBump 续期报告';
+    const mention = GITHUB_ACTOR ? `@${GITHUB_ACTOR} ` : '';
+    const rows = issueEvents.map(e =>
+        `| ${e.icon} | ${e.title} | ${e.detail.replace(/\|/g, '\\|').replace(/\n/g, ' / ')} | ${e.time} |`
+    ).join('\n');
+    const body = `${mention}本次自动续期运行结果：\n\n| 状态 | 事件 | 详情 | 时间 |\n|---|---|---|---|\n${rows}\n\n截图证据见本次 Actions 运行的 screenshots artifact。`;
+
+    try {
+        const res = await axios.get(`${api}/issues`, { headers, params: { state: 'open', per_page: 50 } });
+        const existing = (res.data || []).find(i => i.title === title && !i.pull_request);
+        if (existing) {
+            await axios.post(`${api}/issues/${existing.number}/comments`, { body }, { headers });
+            console.log(`[Issue] 已追加评论到现有报告 issue #${existing.number}`);
+        } else {
+            const created = await axios.post(`${api}/issues`, { title, body }, { headers });
+            console.log(`[Issue] 已创建报告 issue #${created.data.number}`);
+        }
+    } catch (e) {
+        console.error('[Issue] 发布失败:', e.response ? `${e.response.status} ${JSON.stringify(e.response.data).slice(0, 300)}` : e.message);
+    }
+}
+
 // GitHub Actions 环境下的 Chrome 路径 (通常是 google-chrome)
 const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const DEBUG_PORT = 9222;
@@ -409,9 +458,13 @@ async function attemptTurnstileCdp(page) {
                 await page.getByRole('button', { name: 'Login', exact: true }).click();
                 console.log('   >> 已点击 Login，等待跳转到 Dashboard...');
 
+                const isDashboard = () => {
+                    const u = page.url();
+                    return u.includes('dashboard') && !u.includes('/auth/');
+                };
                 const loginDeadline = Date.now() + 60000;
                 while (Date.now() < loginDeadline) {
-                    if (page.url().includes('/dashboard')) { loginOk = true; break; }
+                    if (isDashboard()) { loginOk = true; break; }
                     if (await page.getByText('Incorrect password or no account').isVisible().catch(() => false)) {
                         console.error('   >> ❌ 登录失败: 账号或密码错误');
                         break;
@@ -426,7 +479,7 @@ async function attemptTurnstileCdp(page) {
             if (!loginOk) {
                 const failShotPath = path.join(photoDir, `${safeUsername}_login_fail.png`);
                 try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
-                await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n状态: 未能进入 Dashboard`, failShotPath);
+                recordEvent('❌', '登录失败', [`用户: ${user.username}`, '状态: 未能进入 Dashboard'], failShotPath);
                 continue;
             }
 
@@ -439,7 +492,7 @@ async function attemptTurnstileCdp(page) {
                 console.log('未找到 "See" 按钮。');
                 const seeFailPath = path.join(photoDir, `${safeUsername}_see_fail.png`);
                 try { await page.screenshot({ path: seeFailPath, fullPage: true }); } catch (e) { }
-                await sendTelegramMessage(`❌ *进入服务器页失败*\n用户: ${user.username}\n状态: Dashboard 上未找到 "See" 链接`, seeFailPath);
+                recordEvent('❌', '进入服务器页失败', [`用户: ${user.username}`, '状态: Dashboard 上未找到 "See" 链接'], seeFailPath);
                 continue;
             }
 
@@ -515,7 +568,7 @@ async function attemptTurnstileCdp(page) {
                                     const skipShotPath = path.join(photoDir, `${safeUsername}_skip.png`);
                                     try { await page.screenshot({ path: skipShotPath, fullPage: true }); } catch (e) { }
 
-                                    await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`, skipShotPath);
+                                    recordEvent('⏳', '暂无法续期 (跳过)', [`用户: ${user.username}`, `原因: 还没到时间`, `下次可用: ${dateStr}`], skipShotPath);
 
                                     renewSuccess = true; // 标记完成，跳出重试
                                     try {
@@ -564,7 +617,7 @@ async function attemptTurnstileCdp(page) {
                             const successShotPath = path.join(photoDir, `${safeUsername}_success.png`);
                             try { await page.screenshot({ path: successShotPath, fullPage: true }); } catch (e) { }
 
-                            await sendTelegramMessage(`✅ *续期成功*\n用户: ${user.username}\n状态: 服务器已成功续期！`, successShotPath);
+                            recordEvent('✅', '续期成功', [`用户: ${user.username}`, '状态: 服务器已成功续期！'], successShotPath);
                             renewSuccess = true;
                             break;
                         } else {
@@ -604,6 +657,7 @@ async function attemptTurnstileCdp(page) {
     }
 
     console.log('完成。');
+    await postIssueReport();
     await browser.close();
     process.exit(0);
 })();

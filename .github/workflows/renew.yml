@@ -9,6 +9,8 @@ on:
 jobs:
   renew:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write # 允许脚本发布续期报告 Issue
     
     steps:
     - uses: actions/checkout@v4

@@ -433,8 +433,18 @@ async function attemptTurnstileCdp(page) {
 
             console.log('正在输入凭据...');
             let loginOk = false;
-            try {
-                const emailInput = page.getByRole('textbox', { name: 'Email' });
+            let credError = false;
+            const MAX_LOGIN_ATTEMPTS = 8; // Turnstile 判定有随机性，失败自动重试直到通过
+            for (let loginAttempt = 1; loginAttempt <= MAX_LOGIN_ATTEMPTS && !loginOk && !credError; loginAttempt++) {
+                try {
+                    if (loginAttempt > 1) {
+                        // 重新加载登录页，强制 Cloudflare 重新发起一次新的 challenge
+                        // （同一页面上失败的 Turnstile 不会自动重试）
+                        console.log(`\n--- 登录重试 ${loginAttempt}/${MAX_LOGIN_ATTEMPTS}：重新加载登录页刷新 Turnstile ---`);
+                        await page.goto('https://dashboard.katabump.com/auth/login');
+                        await page.waitForTimeout(3000);
+                    }
+                    const emailInput = page.getByRole('textbox', { name: 'Email' });
                 await emailInput.waitFor({ state: 'visible', timeout: 15000 });
                 await emailInput.fill(user.username);
                 const pwdInput = page.getByRole('textbox', { name: 'Password' });
@@ -478,19 +488,25 @@ async function attemptTurnstileCdp(page) {
                     if (isDashboard()) { loginOk = true; break; }
                     if (await page.getByText('Incorrect password or no account').isVisible().catch(() => false)) {
                         console.error('   >> ❌ 登录失败: 账号或密码错误');
+                        credError = true;
                         break;
                     }
                     await page.waitForTimeout(500);
                 }
-                console.log(loginOk ? '   >> ✅ 登录成功。' : '   >> ❌ 登录未成功。');
-            } catch (e) {
-                console.log('登录错误:', e.message);
+                console.log(loginAttempt > 1 ? `   >> [重试 ${loginAttempt}] ` : '   >> ' + (loginOk ? '✅ 登录成功。' : '❌ 本回合未通过。'));
+                } catch (e) {
+                    console.log('登录错误:', e.message);
+                }
             }
 
+            if (credError) {
+                recordEvent('❌', '账号或密码错误', [`用户: ${user.username}`, '状态: 账号或密码错误，重试无意义，请检查 Secrets']);
+                continue;
+            }
             if (!loginOk) {
                 const failShotPath = path.join(photoDir, `${safeUsername}_login_fail.png`);
                 try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
-                recordEvent('❌', '登录失败', [`用户: ${user.username}`, '状态: 未能进入 Dashboard'], failShotPath);
+                recordEvent('❌', '登录失败', [`用户: ${user.username}`, `状态: 连续 ${MAX_LOGIN_ATTEMPTS} 次重试均未通过 Turnstile`], failShotPath);
                 continue;
             }
 

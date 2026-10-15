@@ -344,6 +344,11 @@ async function attemptTurnstileCdp(page) {
         const user = users[i];
         console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} ===`); // 隐去具体邮箱 logging
 
+        // 截图目录与安全用户名（供本用户全程复用）
+        const photoDir = path.join(process.cwd(), 'screenshots');
+        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
+        const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
+
         try {
             if (page.isClosed()) {
                 page = await context.newPage();
@@ -367,67 +372,62 @@ async function attemptTurnstileCdp(page) {
             }
 
             console.log('正在输入凭据...');
+            let loginOk = false;
             try {
                 const emailInput = page.getByRole('textbox', { name: 'Email' });
-                await emailInput.waitFor({ state: 'visible', timeout: 5000 });
+                await emailInput.waitFor({ state: 'visible', timeout: 15000 });
                 await emailInput.fill(user.username);
                 const pwdInput = page.getByRole('textbox', { name: 'Password' });
                 await pwdInput.fill(user.password);
                 await page.waitForTimeout(500);
 
-                // --- Cloudflare Turnstile Bypass for Login ---
-                console.log('   >> 正在登录前检查 Turnstile (使用 CDP 绕过)...');
-                let cdpClickResult = false;
-                for (let findAttempt = 0; findAttempt < 15; findAttempt++) {
-                    cdpClickResult = await attemptTurnstileCdp(page);
-                    if (cdpClickResult) break;
+                // --- Cloudflare Turnstile: 等待 token 真正生成 ---
+                // KataBump 使用的是非交互式 managed challenge，正常情况下会自动填充
+                // input[name="cf-turnstile-response"]，无需点击。这里必须等 token 出现后再提交，
+                // 否则表单会因缺少 token 而被拒绝（表现为登录后仍停留在登录页）。
+                console.log('   >> 正在等待 Turnstile token 生成...');
+                let tokenLen = 0;
+                for (let s = 0; s < 30; s++) {
+                    tokenLen = await page.evaluate(() => {
+                        const el = document.querySelector('input[name="cf-turnstile-response"]');
+                        return el && el.value ? el.value.length : 0;
+                    }).catch(() => 0);
+                    if (tokenLen > 0) break;
+                    // 兜底：若遇到交互式验证码（有 checkbox），尝试 CDP 点击
+                    if (s === 6 || s === 15 || s === 24) {
+                        const clicked = await attemptTurnstileCdp(page);
+                        if (clicked) console.log('   >> 检测到交互式验证码，已发送 CDP 点击。');
+                    }
                     await page.waitForTimeout(1000);
                 }
-
-                if (cdpClickResult) {
-                    console.log('   >> 登录 CDP 点击生效。正在等待最多 10秒 Cloudflare 成功标志...');
-                    for (let waitSec = 0; waitSec < 10; waitSec++) {
-                        const frames = page.frames();
-                        let isSuccess = false;
-                        for (const f of frames) {
-                            if (f.url().includes('cloudflare')) {
-                                try {
-                                    if (await f.getByText('Success!', { exact: false }).isVisible({ timeout: 500 })) {
-                                        isSuccess = true;
-                                        break;
-                                    }
-                                } catch (e) { }
-                            }
-                        }
-                        if (isSuccess) {
-                            console.log('   >> 登录前 Turnstile 验证成功。');
-                            break;
-                        }
-                        await page.waitForTimeout(1000);
-                    }
-                } else {
-                    console.log('   >> 登录前未检测到或未点击 Turnstile，继续操作...');
+                console.log(`   >> Turnstile token 长度: ${tokenLen}`);
+                if (tokenLen === 0) {
+                    console.log('   >> ⚠️ 未获取到 Turnstile token，登录大概率会失败。');
                 }
-                // --------------------------------------------
 
+                // --- 点击登录并等待页面跳转 ---
                 await page.getByRole('button', { name: 'Login', exact: true }).click();
+                console.log('   >> 已点击 Login，等待跳转到 Dashboard...');
 
-                // User Request: Check for incorrect password
-                try {
-                    const errorMsg = page.getByText('Incorrect password or no account');
-                    if (await errorMsg.isVisible({ timeout: 3000 })) {
-                        console.error(`   >> ❌ 登录失败: 用户 ${user.username} 账号或密码错误`);
-                        const failShotPath = path.join(photoDir, `${safeUsername}.png`);
-                        try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
-
-                        await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n原因: 账号或密码错误`, failShotPath);
-
-                        continue;
+                const loginDeadline = Date.now() + 60000;
+                while (Date.now() < loginDeadline) {
+                    if (page.url().includes('/dashboard')) { loginOk = true; break; }
+                    if (await page.getByText('Incorrect password or no account').isVisible().catch(() => false)) {
+                        console.error('   >> ❌ 登录失败: 账号或密码错误');
+                        break;
                     }
-                } catch (e) { }
-
+                    await page.waitForTimeout(500);
+                }
+                console.log(loginOk ? '   >> ✅ 登录成功。' : '   >> ❌ 登录未成功。');
             } catch (e) {
                 console.log('登录错误:', e.message);
+            }
+
+            if (!loginOk) {
+                const failShotPath = path.join(photoDir, `${safeUsername}_login_fail.png`);
+                try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
+                await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n状态: 未能进入 Dashboard`, failShotPath);
+                continue;
             }
 
             console.log('正在寻找 "See" 链接...');
@@ -437,6 +437,9 @@ async function attemptTurnstileCdp(page) {
                 await page.getByRole('link', { name: 'See' }).first().click();
             } catch (e) {
                 console.log('未找到 "See" 按钮。');
+                const seeFailPath = path.join(photoDir, `${safeUsername}_see_fail.png`);
+                try { await page.screenshot({ path: seeFailPath, fullPage: true }); } catch (e) { }
+                await sendTelegramMessage(`❌ *进入服务器页失败*\n用户: ${user.username}\n状态: Dashboard 上未找到 "See" 链接`, seeFailPath);
                 continue;
             }
 
@@ -509,12 +512,7 @@ async function attemptTurnstileCdp(page) {
                                     console.log(`   >> ⏳ 暂无法续期。下次可用时间: ${dateStr}`);
 
                                     // 截图证明
-                                    const fs = require('fs');
-                                    const path = require('path');
-                                    const photoDir = path.join(process.cwd(), 'screenshots');
-                                    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                                    const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                                    const skipShotPath = path.join(photoDir, `${safeUser}_skip.png`);
+                                    const skipShotPath = path.join(photoDir, `${safeUsername}_skip.png`);
                                     try { await page.screenshot({ path: skipShotPath, fullPage: true }); } catch (e) { }
 
                                     await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`, skipShotPath);
@@ -563,12 +561,7 @@ async function attemptTurnstileCdp(page) {
                             console.log('   >> ✅ Modal closed. Renew successful!');
 
                             // 截图成功状态
-                            const fs = require('fs');
-                            const path = require('path');
-                            const photoDir = path.join(process.cwd(), 'screenshots');
-                            if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                            const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                            const successShotPath = path.join(photoDir, `${safeUser}_success.png`);
+                            const successShotPath = path.join(photoDir, `${safeUsername}_success.png`);
                             try { await page.screenshot({ path: successShotPath, fullPage: true }); } catch (e) { }
 
                             await sendTelegramMessage(`✅ *续期成功*\n用户: ${user.username}\n状态: 服务器已成功续期！`, successShotPath);
@@ -598,10 +591,6 @@ async function attemptTurnstileCdp(page) {
 
         // Snapshot before handling next user
         // In GitHub Actions, we save to 'screenshots' dir
-        const fs = require('fs');
-        const path = require('path');
-        const photoDir = path.join(process.cwd(), 'screenshots');
-        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
         // 使用不包含账号信息的编号作为文件名 (避免公开 Artifact 暴露真实邮箱)
         const screenshotPath = path.join(photoDir, `user_${i + 1}.png`);
         try {

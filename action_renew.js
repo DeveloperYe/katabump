@@ -79,18 +79,29 @@ async function postIssueReport() {
     const body = `${mention}本次自动续期运行结果：\n\n| 状态 | 事件 | 详情 | 时间 |\n|---|---|---|---|\n${rows}\n\n截图证据见本次 Actions 运行的 screenshots artifact。`;
 
     try {
-        const res = await axios.get(`${api}/issues`, { headers, params: { state: 'open', per_page: 50 } });
+        // 本机可能存在 SSL 中间人代理（杀软/抓包工具），GitHub API 请求放宽证书校验（仅此请求）
+        const res = await axios.get(`${api}/issues`, { headers, params: { state: 'open', per_page: 50 }, httpsAgent: newProxyAgent() });
         const existing = (res.data || []).find(i => i.title === title && !i.pull_request);
         if (existing) {
-            await axios.post(`${api}/issues/${existing.number}/comments`, { body }, { headers });
+            await axios.post(`${api}/issues/${existing.number}/comments`, { body }, { headers, httpsAgent: newProxyAgent() });
             console.log(`[Issue] 已追加评论到现有报告 issue #${existing.number}`);
         } else {
-            const created = await axios.post(`${api}/issues`, { title, body }, { headers });
+            const created = await axios.post(`${api}/issues`, { title, body }, { headers, httpsAgent: newProxyAgent() });
             console.log(`[Issue] 已创建报告 issue #${created.data.number}`);
         }
     } catch (e) {
         console.error('[Issue] 发布失败:', e.response ? `${e.response.status} ${JSON.stringify(e.response.data).slice(0, 300)}` : e.message);
     }
+}
+
+// 允许自签证书的 https agent（应对本机 SSL 中间人环境）
+let _tolerantAgent = null;
+function newProxyAgent() {
+    if (!_tolerantAgent) {
+        const https = require('https');
+        _tolerantAgent = new https.Agent({ rejectUnauthorized: false });
+    }
+    return _tolerantAgent;
 }
 
 // GitHub Actions 环境下的 Chrome 路径 (通常是 google-chrome)

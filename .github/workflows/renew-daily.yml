@@ -1,0 +1,71 @@
+name: Katabump Auto Renew (Scheduled)
+
+# 纯 GitHub 侧定时触发，不需要任何自建主机。
+# 为什么要 4 个错峰 cron：GitHub 的 schedule 派发在高峰会延迟甚至丢弃
+# （本账号实测：每周一 03:17 UTC 的任务迟 8 小时才跑）。KataBump 的续期窗口是
+# 每 ~4 天一次，4 个互相独立的时间点 + 脚本幂等（没到窗口会自己跳过并只留一条
+# Issue 记录）足以保证「最多漏一个点也不会错过窗口」。
+on:
+  schedule:
+    - cron: '23 1 * * *'    # UTC 01:23 = 北京时间 09:23
+    - cron: '23 7 * * *'    # UTC 07:23 = 北京时间 15:23
+    - cron: '23 13 * * *'   # UTC 13:23 = 北京时间 21:23
+    - cron: '23 19 * * *'   # UTC 19:23 = 北京时间 03:23
+  workflow_dispatch:
+
+concurrency:
+  group: katabump-renew
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write     # 发布/追加续期报告 Issue
+      contents: write   # keepalive 心跳提交（防公开仓库 60 天无活动被自动停用定时）
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          npm install
+          npx playwright install-deps chrome
+
+      - name: Run Renew Script
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          USERS_JSON: ${{ secrets.USERS_JSON }}
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots/
+
+      - name: Keepalive heartbeat
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p status
+          date -u +'%F' > status/last-scheduled-run.txt
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add status/last-scheduled-run.txt
+          if git diff --cached --quiet; then
+            echo "heartbeat unchanged today - no commit"
+          else
+            git commit -m "chore: renewal heartbeat $(date -u +%F) [skip ci]"
+            git push
+          fi

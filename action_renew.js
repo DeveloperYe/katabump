@@ -51,6 +51,21 @@ const GITHUB_ACTOR = process.env.GITHUB_ACTOR || '';
 const issueEvents = []; // 本次运行的事件收集器
 
 // 统一事件记录：写进 Issue 报告 + 兼容 Telegram（未配置则跳过）
+// [本地补丁 2026-11-25] 邮箱脱敏。
+// 上游把 `用户: ${user.username}`（模板字符串原文）拼进 Issue 正文，而 logUsers() 里的
+// ::add-mask:: 只作用于 Actions **日志**，不作用于 POST 到 issue API 的内容 ——
+// 结果完整邮箱（含 QQ 号/手机号）以明文永久留在仓库 Issue 里。
+// public 仓库（主仓库是 fork，无法转 private）等于公开泄露。
+function maskEmail(value) {
+    const s = String(value == null ? '' : value);
+    const at = s.indexOf('@');
+    if (at < 0) return s.length > 3 ? s.slice(0, 3) + '***' : '***';
+    const local = s.slice(0, at);
+    const domain = s.slice(at);
+    const keep = Math.min(4, Math.max(0, local.length - 3));
+    return local.slice(0, keep) + '***' + domain;
+}
+
 function recordEvent(icon, title, lines, shotPath = null) {
     const detail = Array.isArray(lines) ? lines.join('\n') : String(lines);
     const time = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
@@ -500,13 +515,13 @@ async function attemptTurnstileCdp(page) {
             }
 
             if (credError) {
-                recordEvent('❌', '账号或密码错误', [`用户: ${user.username}`, '状态: 账号或密码错误，重试无意义，请检查 Secrets']);
+                recordEvent('❌', '账号或密码错误', [`用户: ${maskEmail(user.username)}`, '状态: 账号或密码错误，重试无意义，请检查 Secrets']);
                 continue;
             }
             if (!loginOk) {
                 const failShotPath = path.join(photoDir, `${safeUsername}_login_fail.png`);
                 try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
-                recordEvent('❌', '登录失败', [`用户: ${user.username}`, `状态: 连续 ${MAX_LOGIN_ATTEMPTS} 次重试均未通过 Turnstile`], failShotPath);
+                recordEvent('❌', '登录失败', [`用户: ${maskEmail(user.username)}`, `状态: 连续 ${MAX_LOGIN_ATTEMPTS} 次重试均未通过 Turnstile`], failShotPath);
                 continue;
             }
 
@@ -519,7 +534,7 @@ async function attemptTurnstileCdp(page) {
                 console.log('未找到 "See" 按钮。');
                 const seeFailPath = path.join(photoDir, `${safeUsername}_see_fail.png`);
                 try { await page.screenshot({ path: seeFailPath, fullPage: true }); } catch (e) { }
-                recordEvent('❌', '进入服务器页失败', [`用户: ${user.username}`, '状态: Dashboard 上未找到 "See" 链接'], seeFailPath);
+                recordEvent('❌', '进入服务器页失败', [`用户: ${maskEmail(user.username)}`, '状态: Dashboard 上未找到 "See" 链接'], seeFailPath);
                 continue;
             }
 
@@ -595,7 +610,7 @@ async function attemptTurnstileCdp(page) {
                                     const skipShotPath = path.join(photoDir, `${safeUsername}_skip.png`);
                                     try { await page.screenshot({ path: skipShotPath, fullPage: true }); } catch (e) { }
 
-                                    recordEvent('⏳', '暂无法续期 (跳过)', [`用户: ${user.username}`, `原因: 还没到时间`, `下次可用: ${dateStr}`], skipShotPath);
+                                    recordEvent('⏳', '暂无法续期 (跳过)', [`用户: ${maskEmail(user.username)}`, `原因: 还没到时间`, `下次可用: ${dateStr}`], skipShotPath);
 
                                     renewSuccess = true; // 标记完成，跳出重试
                                     try {
@@ -644,7 +659,7 @@ async function attemptTurnstileCdp(page) {
                             const successShotPath = path.join(photoDir, `${safeUsername}_success.png`);
                             try { await page.screenshot({ path: successShotPath, fullPage: true }); } catch (e) { }
 
-                            recordEvent('✅', '续期成功', [`用户: ${user.username}`, '状态: 服务器已成功续期！'], successShotPath);
+                            recordEvent('✅', '续期成功', [`用户: ${maskEmail(user.username)}`, '状态: 服务器已成功续期！'], successShotPath);
                             renewSuccess = true;
                             break;
                         } else {

@@ -1,0 +1,45 @@
+name: Node Speed Probe (temporary)
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Get xray
+        run: |
+          curl -sL -o x.zip https://github.com/XTLS/Xray-core/releases/download/v26.11.9/Xray-linux-64.zip
+          unzip -q x.zip -d .
+          chmod +x xray
+          ./xray version | head -2
+      - name: Client config
+        run: |
+          cat > c.json <<'EOF'
+          {
+            "log": {"loglevel": "warning"},
+            "inbounds": [{"listen":"127.0.0.1","port":10821,"protocol":"socks","settings":{"auth":"noauth","udp":true}}],
+            "outbounds": [{
+              "protocol": "vless",
+              "settings": {"vnext":[{"address":"147.135.128.19","port":20151,
+                "users":[{"id":"d5a580c8-6eb7-474e-9c6d-e45461852297","encryption":"none","flow":"xtls-rprx-vision"}]}]},
+              "streamSettings": {"network":"tcp","security":"reality",
+                "realitySettings":{"serverName":"www.samsung.com","fingerprint":"chrome",
+                  "publicKey":"kgixzOKcGYEmfXgOJJ2NSPU-PyfYjRpHTt56EUsmT0k","shortId":"231b8e33","spiderX":"/"}}
+            }]
+          }
+          EOF
+          nohup ./xray run -c c.json > xray.log 2>&1 &
+          sleep 3
+      - name: Egress
+        run: curl -s --max-time 20 --socks5-hostname 127.0.0.1:10821 https://www.cloudflare.com/cdn-cgi/trace | head -5 || true
+      - name: Throughput 20MB
+        run: |
+          for i in 1 2; do
+            curl -s -o /dev/null --max-time 45 --socks5-hostname 127.0.0.1:10821 -w "run$i speed=%{speed_download}B/s got=%{size_download} t=%{time_total}s\n" https://speed.cloudflare.com/__down?bytes=20000000 || true
+          done
+      - name: Direct baseline on runner
+        run: curl -s -o /dev/null --max-time 45 -w "direct speed=%{speed_download}B/s got=%{size_download} t=%{time_total}s\n" https://speed.cloudflare.com/__down?bytes=20000000 || true
+      - name: Xray log
+        if: always()
+        run: tail -20 xray.log || true

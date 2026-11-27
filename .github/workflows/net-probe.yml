@@ -1,0 +1,17 @@
+name: Net Probe (temporary)
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: ICMP
+        run: ping -c 3 -W 2 51.75.118.17 || true
+      - name: TCP 20270
+        run: timeout 10 bash -c 'cat < /dev/null > /dev/tcp/51.75.118.17/20270' && echo "TCP20270=OPEN" || echo "TCP20270=CLOSED"
+      - name: TLS REALITY fallback (SNI samsung)
+        run: timeout 15 openssl s_client -connect 51.75.118.17:20270 -servername www.samsung.com </dev/null 2>&1 | head -40 || true
+      - name: HTTPS through fallback
+        run: curl -s -o /dev/null --max-time 15 --resolve www.samsung.com:20270:51.75.118.17 -w "http=%{http_code} tls=%{time_appconnect}\n" https://www.samsung.com:20270/ || echo "curl failed"
